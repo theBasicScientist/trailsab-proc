@@ -191,7 +191,7 @@ If you use this system in your research, please cite:
 
 For questions, issues, or feature requests:
 - Open an issue on GitHub
-- Contact: [Add contact information]
+- Contact: theScientist@theBasicScientist.com
 
 ## Acknowledgments
 
