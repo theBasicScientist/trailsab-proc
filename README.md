@@ -51,7 +51,11 @@ git clone https://github.com/SympatiCog/trailsab-proc.git
 cd trailsab-proc
 pip install -r requirements.txt
 # Or using uv:
+cd trailsab-proc
 uv pip install -e .
+# Creating a new environment using uv:
+cd trailsab-proc
+uv sync
 ```
 
 ## Usage
