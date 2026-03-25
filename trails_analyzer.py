@@ -450,13 +450,19 @@ class TrailsAnalyzer:
                 circle = circles[circle_label]
                 
                 # Find when we ENTERED this circle (working backwards from end of current segment)
+                # We want the first point of the contiguous run inside the circle at the
+                # tail of the segment — i.e. the actual moment of entry, not the last point.
                 entry_time = None
                 current_points = current_seg.points.reset_index(drop=True)
-                
+
                 for idx in range(len(current_points) - 1, -1, -1):  # Work backwards
                     point = current_points.iloc[idx]
                     if circle.contains_point(point['x'], point['y']):
                         entry_time = point['seconds']
+                    else:
+                        # We've found the last point outside the circle before the
+                        # contiguous inside-run, so entry_time is already set to the
+                        # earliest point inside the circle at the tail end.
                         break
                 
                 # Find when we LEFT this circle (working forwards from start of next segment)
