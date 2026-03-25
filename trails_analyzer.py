@@ -414,86 +414,134 @@ class TrailsAnalyzer:
     def calculate_think_times(self, segments: List[LineSegment], trail_id: str) -> List[LineSegment]:
         """
         Calculate think times using consecutive segments approach
-        
-        Think time at a circle = time from entering the circle (end of incoming segment) 
+
+        Think time at a circle = time from entering the circle (end of incoming segment)
                                 to leaving the circle (start of outgoing segment)
-        
+
+        When errors occurred at a circle (i.e. error segments start from the same circle
+        between the correct incoming and outgoing segments), the think time is measured
+        from when the user re-entered the circle after the reset, not from the original
+        arrival. This avoids including error detour + reset time in think time.
+
         Args:
             segments: List of LineSegment objects in order
             trail_id: Trail identifier for circle lookup
-        
+
         Returns:
             Updated list of segments with think times calculated
         """
         circles = self.circles[trail_id]
-        
+
         # Sort segments to ensure proper order (by their actual sequence in the task)
         # For trails, we can use the circle order from the configuration
         trail_config = self.config[trail_id]
         circle_order = {item['label']: item['order'] for item in trail_config['items']}
-        
-        # Sort segments by the order of their start circles
-        segments = sorted(segments, key=lambda s: circle_order.get(s.start_label, 999))
-        
-        # Calculate think times for consecutive segments
-        for i in range(len(segments) - 1):
-            current_seg = segments[i]
-            next_seg = segments[i + 1]
-            
+
+        # Separate correct and error segments
+        correct_segments = [s for s in segments if not s.is_error]
+        error_segments = [s for s in segments if s.is_error]
+
+        # Sort correct segments by the order of their start circles
+        correct_segments = sorted(correct_segments,
+                                  key=lambda s: circle_order.get(s.start_label, 999))
+
+        # Build a set of circles where errors occurred (error segments starting from that circle)
+        error_circles = {s.start_label for s in error_segments}
+
+        # Calculate think times for consecutive correct segments
+        for i in range(len(correct_segments) - 1):
+            current_seg = correct_segments[i]
+            next_seg = correct_segments[i + 1]
+
             # The destination of current segment should equal origin of next segment
             if current_seg.end_label == next_seg.start_label:
                 circle_label = current_seg.end_label
-                
+
                 if circle_label not in circles:
                     continue
-                
-                circle = circles[circle_label]
-                
-                # Find when we ENTERED this circle (working backwards from end of current segment)
-                # We want the first point of the contiguous run inside the circle at the
-                # tail of the segment — i.e. the actual moment of entry, not the last point.
-                entry_time = None
-                current_points = current_seg.points.reset_index(drop=True)
 
-                for idx in range(len(current_points) - 1, -1, -1):  # Work backwards
-                    point = current_points.iloc[idx]
-                    if circle.contains_point(point['x'], point['y']):
-                        entry_time = point['seconds']
-                    else:
-                        # We've found the last point outside the circle before the
-                        # contiguous inside-run, so entry_time is already set to the
-                        # earliest point inside the circle at the tail end.
-                        break
-                
-                # Find when we LEFT this circle (working forwards from start of next segment)
-                exit_time = None
-                next_points = next_seg.points.reset_index(drop=True)
-                
-                for idx in range(len(next_points)):
-                    point = next_points.iloc[idx]
-                    if not circle.contains_point(point['x'], point['y']):
-                        exit_time = point['seconds']
-                        break
-                
+                circle = circles[circle_label]
+
+                # Check if errors occurred at this circle between these two correct segments.
+                # If so, the user was reset back to this circle after the error, so we should
+                # measure think time from re-entry (start of next correct segment) rather than
+                # from the original arrival (end of current segment).
+                errors_at_circle = circle_label in error_circles
+
+                if errors_at_circle:
+                    # Use the start of the outgoing correct segment to find entry_time.
+                    # The user re-entered this circle after the reset, so the first points
+                    # of the next segment that are inside the circle represent the re-entry.
+                    entry_time = None
+                    next_points = next_seg.points.reset_index(drop=True)
+
+                    for idx in range(len(next_points)):
+                        point = next_points.iloc[idx]
+                        if circle.contains_point(point['x'], point['y']):
+                            entry_time = point['seconds']
+                            break
+
+                    # Find when we LEFT this circle (first point outside after entry)
+                    exit_time = None
+                    if entry_time is not None:
+                        for idx in range(len(next_points)):
+                            point = next_points.iloc[idx]
+                            if not circle.contains_point(point['x'], point['y']):
+                                exit_time = point['seconds']
+                                break
+                else:
+                    # No errors at this circle — use the standard approach.
+                    # Find when we ENTERED this circle (working backwards from end of
+                    # current segment). We want the first point of the contiguous run
+                    # inside the circle at the tail — the actual moment of entry.
+                    entry_time = None
+                    current_points = current_seg.points.reset_index(drop=True)
+
+                    for idx in range(len(current_points) - 1, -1, -1):  # Work backwards
+                        point = current_points.iloc[idx]
+                        if circle.contains_point(point['x'], point['y']):
+                            entry_time = point['seconds']
+                        else:
+                            # We've found the last point outside the circle before the
+                            # contiguous inside-run, so entry_time is already set to the
+                            # earliest point inside the circle at the tail end.
+                            break
+
+                    # Find when we LEFT this circle (working forwards from start of next segment)
+                    exit_time = None
+                    next_points = next_seg.points.reset_index(drop=True)
+
+                    for idx in range(len(next_points)):
+                        point = next_points.iloc[idx]
+                        if not circle.contains_point(point['x'], point['y']):
+                            exit_time = point['seconds']
+                            break
+
                 # If we couldn't find exit time, use the first point of next segment
-                if exit_time is None and len(next_points) > 0:
+                if exit_time is None and len(next_seg.points) > 0:
+                    next_points = next_seg.points.reset_index(drop=True)
                     exit_time = next_points.iloc[0]['seconds']
-                
+
                 # Calculate think time and assign to the next segment (the one leaving this circle)
                 if entry_time is not None and exit_time is not None and exit_time > entry_time:
                     think_time = exit_time - entry_time
                     next_seg.think_time = think_time
-                    
+
                     # Also store which circle this think time applies to
                     next_seg.think_circle_label = circle_label
-        
+
+        # Re-combine correct and error segments, preserving original order
+        segments = sorted(correct_segments + error_segments,
+                         key=lambda s: circle_order.get(s.start_label, 999))
+
         # Handle the first segment - check if user started inside the first circle
-        if segments and len(segments[0].points) > 0:
-            first_seg = segments[0]
+        # (use first correct segment)
+        if correct_segments and len(correct_segments[0].points) > 0:
+            first_seg = correct_segments[0]
             if first_seg.start_label in circles:
                 start_circle = circles[first_seg.start_label]
                 first_points = first_seg.points.reset_index(drop=True)
-                
+
                 # Find how long user stayed in starting circle
                 exit_time = None
                 for idx in range(len(first_points)):
@@ -501,13 +549,13 @@ class TrailsAnalyzer:
                     if not start_circle.contains_point(point['x'], point['y']):
                         exit_time = point['seconds']
                         break
-                
+
                 if exit_time is not None:
                     # Think time for first segment is from start to leaving first circle
                     start_time = first_points.iloc[0]['seconds']
                     first_seg.think_time = exit_time - start_time
                     first_seg.think_circle_label = first_seg.start_label
-        
+
         return segments
     
     def _calculate_smoothness(self, points: pd.DataFrame) -> float:
